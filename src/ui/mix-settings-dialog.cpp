@@ -844,7 +844,8 @@ bool MixSettingsDialog::validate_and_store()
 
 	cfg_.record = record_->isChecked();
 	cfg_.trigger = selected<Trigger>(trigger_);
-	if (container_->isEnabled()) {
+	const bool files_locked = active(OutputKind::Record) || active(OutputKind::Replay);
+	if (!files_locked) {
 		cfg_.container = selected<Container>(container_);
 		cfg_.folder = folder_->text().trimmed().toStdString();
 		cfg_.encoder_id = encoder_->currentData().toString().toStdString();
@@ -856,12 +857,12 @@ bool MixSettingsDialog::validate_and_store()
 		cfg_.audio_tracks = mask ? mask : 1u;
 		cfg_.audio_bitrate = audio_bitrate_->currentData().toInt();
 	}
-	if (audio_source_ && audio_source_->isEnabled())
+	if (audio_source_ && !any_active())
 		cfg_.audio_source = audio_source_->isChecked() ? AudioSource::Source : AudioSource::Tracks;
 
 	cfg_.replay = replay_->isChecked();
 	cfg_.replay_trigger = selected<Trigger>(replay_trigger_);
-	if (replay_seconds_->isEnabled()) {
+	if (!active(OutputKind::Replay)) {
 		cfg_.replay_seconds = replay_seconds_->value();
 		cfg_.replay_mb = replay_mb_->value();
 	}
@@ -869,7 +870,7 @@ bool MixSettingsDialog::validate_and_store()
 
 	cfg_.stream = stream_->isChecked();
 	cfg_.stream_trigger = selected<Trigger>(stream_trigger_);
-	if (server_->isEnabled()) {
+	if (!active(OutputKind::Stream)) {
 		cfg_.stream_server = server_->text().trimmed().toStdString();
 		cfg_.stream_key = key_->text().trimmed().toStdString();
 		cfg_.stream_encoder_id = stream_encoder_->currentData().toString().toStdString();
