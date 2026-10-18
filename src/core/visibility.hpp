@@ -20,4 +20,7 @@ void set_hidden(obs_sceneitem_t *item, uint32_t mix_bit, bool hidden);
 /* Removes a mix bit from every scene item of the loaded scene collection (used when a mix is deleted). */
 void clear_bit_everywhere(uint32_t mix_bit);
 
+/* Hides every item hidden for one mix in another one too (used when a mix is duplicated). */
+void copy_bit_everywhere(uint32_t from_bit, uint32_t to_bit);
+
 } // namespace vmix

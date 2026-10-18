@@ -2,6 +2,7 @@
 
 #include <obs.hpp>
 
+#include <functional>
 #include <mutex>
 
 namespace vmix {
@@ -11,18 +12,33 @@ namespace {
 constexpr const char *kKey = "video_mixes_hidden";
 std::mutex g_mutex;
 
-void clear_in_scene(obs_scene_t *scene, uint32_t bit)
+using ItemFn = std::function<void(obs_sceneitem_t *)>;
+
+/* Calls fn for every item of a scene, including items inside groups. */
+void for_each_item(obs_scene_t *scene, const ItemFn &fn)
 {
 	obs_scene_enum_items(
 		scene,
 		[](obs_scene_t *, obs_sceneitem_t *item, void *param) {
-			const uint32_t b = *static_cast<uint32_t *>(param);
-			set_hidden(item, b, false);
+			const ItemFn &f = *static_cast<const ItemFn *>(param);
+			f(item);
 			if (obs_sceneitem_is_group(item))
-				clear_in_scene(obs_sceneitem_group_get_scene(item), b);
+				for_each_item(obs_sceneitem_group_get_scene(item), f);
 			return true;
 		},
-		&bit);
+		const_cast<ItemFn *>(&fn));
+}
+
+/* Calls fn for every item of every scene in the loaded scene collection. */
+void for_each_item_everywhere(const ItemFn &fn)
+{
+	obs_enum_scenes(
+		[](void *param, obs_source_t *source) {
+			if (obs_scene_t *scene = obs_scene_from_source(source))
+				for_each_item(scene, *static_cast<const ItemFn *>(param));
+			return true;
+		},
+		const_cast<ItemFn *>(&fn));
 }
 
 } // namespace
@@ -54,13 +70,14 @@ void set_hidden(obs_sceneitem_t *item, uint32_t mix_bit, bool hidden)
 
 void clear_bit_everywhere(uint32_t mix_bit)
 {
-	obs_enum_scenes(
-		[](void *param, obs_source_t *source) {
-			if (obs_scene_t *scene = obs_scene_from_source(source))
-				clear_in_scene(scene, *static_cast<uint32_t *>(param));
-			return true;
-		},
-		&mix_bit);
+	for_each_item_everywhere([mix_bit](obs_sceneitem_t *item) { set_hidden(item, mix_bit, false); });
+}
+
+void copy_bit_everywhere(uint32_t from_bit, uint32_t to_bit)
+{
+	for_each_item_everywhere([from_bit, to_bit](obs_sceneitem_t *item) {
+		set_hidden(item, to_bit, (hidden_mask(item) & from_bit) != 0);
+	});
 }
 
 } // namespace vmix

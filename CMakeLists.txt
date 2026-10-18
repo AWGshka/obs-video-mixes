@@ -18,6 +18,7 @@ if(WIN32 AND CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
 endif()
 
 option(VMIX_BUILD_SMOKE_TEST "Build the headless libobs smoke test" ON)
+option(VMIX_DEV_SNAPSHOTS "Developer aid: render the dock and settings pages to PNGs (VMIX_SNAPSHOT_DIR)" OFF)
 
 include(cmake/obs-sdk.cmake)
 
@@ -45,10 +46,14 @@ target_sources(
     src/ui/mix-settings-dialog.cpp
     src/ui/preview.cpp
     src/ui/properties-form.cpp
+    src/ui/visibility-tree.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE src)
 target_compile_definitions(${PROJECT_NAME} PRIVATE VMIX_VERSION="${PROJECT_VERSION}")
+if(VMIX_DEV_SNAPSHOTS)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE VMIX_DEV_SNAPSHOTS)
+endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE OBS::libobs OBS::obs-frontend-api Qt6::Widgets)
 
 if(MSVC)

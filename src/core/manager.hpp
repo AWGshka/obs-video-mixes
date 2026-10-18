@@ -62,7 +62,13 @@ public:
 	const MixConfig *find(uint32_t id) const;
 	uint32_t find_by_name(const std::string &name) const;
 
-	uint32_t add_mix(const std::string &name, MixKind kind);
+	/* Settings for a new mix: defaults plus OBS' own recording/stream setup. Not added until add_mix(). */
+	MixConfig new_mix(const std::string &name, MixKind kind) const;
+	/* Adds a mix (cfg.id is assigned); returns its id, or 0 if all ids are taken. */
+	uint32_t add_mix(MixConfig cfg);
+	uint32_t add_mix(const std::string &name, MixKind kind) { return add_mix(new_mix(name, kind)); }
+	/* Copy of a mix with a new name; outputs off-trigger as configured. Returns the new id or 0. */
+	uint32_t duplicate_mix(uint32_t id, const std::string &name);
 	void update_mix(const MixConfig &cfg);
 	void remove_mix(uint32_t id);
 

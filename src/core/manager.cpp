@@ -276,7 +276,19 @@ Manager::Runtime *Manager::runtime(uint32_t id) const
 	return it == mixes_.end() ? nullptr : it->get();
 }
 
-uint32_t Manager::add_mix(const std::string &name, MixKind kind)
+MixConfig Manager::new_mix(const std::string &name, MixKind kind) const
+{
+	MixConfig cfg = default_mix(0, name, kind);
+	/* Same encoder, bitrate, audio and format as OBS recordings. */
+	if (inherit_obs_recording(cfg))
+		blog(LOG_INFO, "[video-mixes] New mix '%s' inherits OBS recording settings: %s %s, tracks 0x%x, %d kbps audio",
+		     cfg.name.c_str(), cfg.encoder_id.c_str(), obs_data_get_json(cfg.encoder_settings), cfg.audio_tracks,
+		     cfg.audio_bitrate);
+	inherit_obs_stream(cfg);
+	return cfg;
+}
+
+uint32_t Manager::add_mix(MixConfig cfg)
 {
 	Config tmp;
 	tmp.next_id = next_id_;
@@ -288,18 +300,33 @@ uint32_t Manager::add_mix(const std::string &name, MixKind kind)
 	next_id_ = tmp.next_id;
 
 	auto rt = std::make_unique<Runtime>();
-	rt->cfg = default_mix(id, name, kind);
-	/* Same encoder, bitrate, audio and format as OBS recordings. */
-	if (inherit_obs_recording(rt->cfg))
-		blog(LOG_INFO, "[video-mixes] Mix '%s' inherits OBS recording settings: %s %s, tracks 0x%x, %d kbps audio",
-		     rt->cfg.name.c_str(), rt->cfg.encoder_id.c_str(), obs_data_get_json(rt->cfg.encoder_settings),
-		     rt->cfg.audio_tracks, rt->cfg.audio_bitrate);
-	inherit_obs_stream(rt->cfg);
+	cfg.id = id;
+	rt->cfg = std::move(cfg);
 	sync_hotkeys(*rt);
 	mixes_.push_back(std::move(rt));
 	save();
 	notify();
 	return id;
+}
+
+uint32_t Manager::duplicate_mix(uint32_t id, const std::string &name)
+{
+	const Runtime *rt = runtime(id);
+	if (!rt)
+		return 0;
+	MixConfig copy = rt->cfg;
+	copy.name = name;
+	/* Deep copies: settings objects must not be shared between mixes. */
+	copy.encoder_settings = new_data();
+	obs_data_apply(copy.encoder_settings, rt->cfg.encoder_settings);
+	copy.stream_encoder_settings = new_data();
+	obs_data_apply(copy.stream_encoder_settings, rt->cfg.stream_encoder_settings);
+	copy.hotkeys.clear();
+	const uint32_t new_id = add_mix(std::move(copy));
+	/* Program mixes: start with the same hidden items. */
+	if (new_id && rt->cfg.kind == MixKind::Program)
+		copy_bit_everywhere(rt->cfg.bit(), 1u << new_id);
+	return new_id;
 }
 
 void Manager::update_mix(const MixConfig &cfg)
