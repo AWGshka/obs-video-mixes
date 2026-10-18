@@ -223,11 +223,19 @@ public:
 	void delete_mix(uint32_t id);
 	void duplicate_mix(uint32_t id);
 
+protected:
+	void showEvent(QShowEvent *event) override
+	{
+		QWidget::showEvent(event);
+		fit_cards();
+	}
+
 private:
 	void on_manager_changed();
 	void sync_cards(const std::vector<MixState> &states);
 	void update_status();
 	void update_tree_title();
+	void fit_cards();
 	void add_mix(MixKind kind);
 	QMenu *add_menu(QWidget *parent);
 
@@ -243,6 +251,9 @@ private:
 	QLabel *preview_title_ = nullptr;
 	MixPreview *preview_ = nullptr;
 	QTimer status_timer_;
+	QSplitter *splitter_ = nullptr;
+	QWidget *scroll_content_ = nullptr;
+	bool user_sized_ = false;
 
 	std::vector<MixCard *> cards_list_;
 	struct Rate {
@@ -491,18 +502,20 @@ MixesDock::MixesDock()
 	}
 	preview_section_->hide();
 
-	auto *splitter = new QSplitter(Qt::Vertical);
-	splitter->setChildrenCollapsible(false);
-	splitter->addWidget(scroll);
-	splitter->addWidget(tree_section_);
-	splitter->addWidget(preview_section_);
-	splitter->setStretchFactor(0, 0);
-	splitter->setStretchFactor(1, 1);
-	splitter->setStretchFactor(2, 1);
+	splitter_ = new QSplitter(Qt::Vertical);
+	splitter_->setChildrenCollapsible(false);
+	splitter_->addWidget(scroll);
+	splitter_->addWidget(tree_section_);
+	splitter_->addWidget(preview_section_);
+	splitter_->setStretchFactor(0, 0);
+	splitter_->setStretchFactor(1, 1);
+	splitter_->setStretchFactor(2, 1);
+	connect(splitter_, &QSplitter::splitterMoved, this, [this] { user_sized_ = true; });
+	scroll_content_ = top;
 
 	auto *layout = new QVBoxLayout(this);
 	layout->setContentsMargins(0, 0, 0, 0);
-	layout->addWidget(splitter);
+	layout->addWidget(splitter_);
 
 	status_timer_.setInterval(1000);
 	connect(&status_timer_, &QTimer::timeout, this, [this] { update_status(); });
@@ -580,6 +593,31 @@ void MixesDock::on_manager_changed()
 		card->set_previewing(card->id() == preview_->mix_id());
 	update_tree_title();
 	update_status();
+	fit_cards();
+}
+
+/* Until the user drags the splitter, the mixes area takes the height of its cards, up to about half the dock. */
+void MixesDock::fit_cards()
+{
+	if (user_sized_ || !isVisible())
+		return;
+	QTimer::singleShot(0, this, [this] {
+		const QList<int> sizes = splitter_->sizes();
+		int total = 0;
+		for (int s : sizes)
+			total += s;
+		if (total <= 0)
+			return;
+		const bool lower_visible = tree_section_->isVisible() || preview_section_->isVisible();
+		const int wanted = lower_visible ? std::min(scroll_content_->sizeHint().height() + 2, total * 55 / 100) : total;
+		QList<int> next = sizes;
+		next[0] = wanted;
+		const int rest = total - wanted;
+		const int lower = (tree_section_->isVisible() ? 1 : 0) + (preview_section_->isVisible() ? 1 : 0);
+		next[1] = tree_section_->isVisible() ? rest / std::max(1, lower) : 0;
+		next[2] = preview_section_->isVisible() ? rest - next[1] : 0;
+		splitter_->setSizes(next);
+	});
 }
 
 void MixesDock::update_tree_title()

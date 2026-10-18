@@ -35,7 +35,7 @@ jobs:
           Invoke-WebRequest $url -OutFile obs.zip
           Expand-Archive obs.zip -DestinationPath obs-zip
           $dll = Get-ChildItem obs-zip -Recurse -Filter obs.dll | Where-Object { $_.Directory.Name -eq '64bit' } | Select-Object -First 1
-          $root = $dll.Directory.Parent.Parent.FullName -replace '\', '/'
+          $root = $dll.Directory.Parent.Parent.FullName.Replace([char]92, [char]47)
           "OBS_DIR=$root" >> $env:GITHUB_ENV
           $version = (Select-String -Path CMakeLists.txt -Pattern 'project\(obs-video-mixes VERSION ([0-9.]+)').Matches[0].Groups[1].Value
           "VMIX_VERSION=$version" >> $env:GITHUB_ENV
