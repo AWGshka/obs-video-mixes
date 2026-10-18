@@ -7,3 +7,4 @@ CMakeUserPresets.json
 .idea/
 /.cache/
 /build-dev/
+/stage/
