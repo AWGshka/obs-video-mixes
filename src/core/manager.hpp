@@ -8,6 +8,7 @@
 #include <obs.hpp>
 
 #include <array>
+#include <atomic>
 #include <functional>
 #include <map>
 #include <memory>
@@ -120,9 +121,13 @@ private:
 		std::string error;
 		std::map<std::string, obs_hotkey_id> hotkeys;
 
+		/* Stopped outputs, released after a grace period (see retire()). They keep the canvas alive. */
+		std::vector<std::pair<uint64_t, std::unique_ptr<MixOutput>>> retired;
+
 		Output &out(OutputKind k) { return outputs[(size_t)k]; }
 		const Output &out(OutputKind k) const { return outputs[(size_t)k]; }
-		bool any_output() const;
+		bool any_output() const;  /* live outputs */
+		bool holds_canvas() const { return any_output() || !retired.empty(); }
 	};
 
 	Manager() = default;
@@ -142,6 +147,9 @@ private:
 
 	void on_output_event(uint64_t token, OutputEvent event, int code, const std::string &text);
 	void on_video_reset();
+	void retire(Runtime &rt, std::unique_ptr<MixOutput> out);
+	void reap(bool all);
+	static void reap_tick(void *param, float seconds);
 	void start_triggered(Trigger trigger);
 	void stop_triggered(Trigger trigger);
 	std::string build_path(const MixConfig &cfg, Trigger origin) const;
@@ -155,6 +163,8 @@ private:
 	std::vector<std::pair<int, ReplayListener>> replay_listeners_;
 	int next_listener_ = 1;
 	OBSSignal video_reset_signal_;
+	bool reap_tick_registered_ = false;
+	std::atomic<bool> reap_queued_{false};
 };
 
 } // namespace vmix

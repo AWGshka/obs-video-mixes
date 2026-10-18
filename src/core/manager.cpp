@@ -190,6 +190,10 @@ void Manager::release_all()
 		return;
 	save();
 	released_ = true; /* later save callbacks must not overwrite the config with an empty list */
+	/* Outputs that stopped a moment ago may still have a thread finishing up (see retire()). */
+	if (std::any_of(mixes_.begin(), mixes_.end(), [](const auto &rt) { return !rt->retired.empty(); }))
+		os_sleep_ms(100);
+	reap(true);
 	for (auto &rt : mixes_) {
 		for (Output &o : rt->outputs)
 			o.out.reset();
@@ -349,7 +353,7 @@ void Manager::update_mix(const MixConfig &cfg)
 	sync_hotkeys(*rt);
 	if (rt->canvas && fade_changed)
 		rt->canvas->set_fade(rt->cfg.transitions == TransitionStyle::Fade);
-	if (rt->canvas && resized && !rt->any_output()) {
+	if (rt->canvas && resized && !rt->holds_canvas()) {
 		rt->canvas.reset();
 		if (rt->preview_users > 0)
 			ensure_canvas(*rt);
@@ -366,6 +370,7 @@ void Manager::remove_mix(uint32_t id)
 	Runtime &rt = **it;
 	for (Output &o : rt.outputs)
 		o.out.reset();
+	rt.retired.clear();
 	rt.canvas.reset();
 	unregister_hotkeys(rt);
 	clear_bit_everywhere(rt.cfg.bit());
@@ -388,7 +393,7 @@ MixCanvas *Manager::ensure_canvas(Runtime &rt)
 
 void Manager::release_if_unused(Runtime &rt)
 {
-	if (!rt.any_output() && rt.preview_users <= 0)
+	if (!rt.holds_canvas() && rt.preview_users <= 0)
 		rt.canvas.reset();
 }
 
@@ -743,7 +748,7 @@ void Manager::on_output_event(uint64_t token, OutputEvent event, int code, const
 				     kOutputNames[k], code);
 				if ((OutputKind)k == OutputKind::Record)
 					o.last_path = o.out->path();
-				o.out.reset();
+				retire(*rt, std::move(o.out));
 				o.reconnecting = false;
 				o.error = output_error_message(code, text);
 				release_if_unused(*rt);
@@ -770,10 +775,62 @@ void Manager::on_output_event(uint64_t token, OutputEvent event, int code, const
 	}
 }
 
+/*
+ * An output's "stop" signal comes from the output's own thread, which may still be finishing (obs-outputs'
+ * rtmp connect_thread logs and detaches itself after signalling a failed connect). Destroying the output right
+ * away races that thread, so stopped outputs are released after a grace period, as OBS' frontend never destroys
+ * its outputs on stop either.
+ */
+void Manager::retire(Runtime &rt, std::unique_ptr<MixOutput> out)
+{
+	constexpr uint64_t kGraceNs = 2'000'000'000ULL;
+	rt.retired.emplace_back(os_gettime_ns() + kGraceNs, std::move(out));
+	if (!reap_tick_registered_) {
+		obs_add_tick_callback(&Manager::reap_tick, this);
+		reap_tick_registered_ = true;
+	}
+}
+
+/* Graphics thread, every frame while outputs wait to be released: hand the work to the UI thread. */
+void Manager::reap_tick(void *param, float)
+{
+	auto *self = static_cast<Manager *>(param);
+	static thread_local uint64_t last = 0;
+	const uint64_t now = os_gettime_ns();
+	if (now - last < 500'000'000ULL || self->reap_queued_.exchange(true))
+		return;
+	last = now;
+	obs_queue_task(
+		OBS_TASK_UI,
+		[](void *) {
+			Manager &m = Manager::get();
+			m.reap_queued_ = false;
+			m.reap(false);
+		},
+		nullptr, false);
+}
+
+void Manager::reap(bool all)
+{
+	const uint64_t now = os_gettime_ns();
+	bool waiting = false;
+	for (auto &rt : mixes_) {
+		const size_t before = rt->retired.size();
+		std::erase_if(rt->retired, [&](const auto &entry) { return all || entry.first <= now; });
+		if (rt->retired.size() != before)
+			release_if_unused(*rt);
+		waiting = waiting || !rt->retired.empty();
+	}
+	if (!waiting && reap_tick_registered_) {
+		obs_remove_tick_callback(&Manager::reap_tick, this);
+		reap_tick_registered_ = false;
+	}
+}
+
 void Manager::on_video_reset()
 {
 	for (auto &rt : mixes_) {
-		if (!rt->canvas || rt->any_output())
+		if (!rt->canvas || rt->holds_canvas())
 			continue;
 		rt->canvas.reset();
 		if (rt->preview_users > 0)

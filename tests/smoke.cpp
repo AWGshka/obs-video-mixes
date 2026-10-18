@@ -445,6 +445,7 @@ void check_outputs(video_t *video, const std::string &dir)
 		       "recording kept encoding next to the replay buffer: " + std::to_string(frames) + " frames");
 		os_unlink(rec.path.c_str());
 	}
+	wait_ms(200);
 	record.reset();
 	replay.reset();
 
@@ -470,6 +471,7 @@ void check_outputs(video_t *video, const std::string &dir)
 	} else {
 		expect(!error.empty(), "unreachable server: start fails with a message: " + error);
 	}
+	wait_ms(200); /* like Manager::retire(): the output's connect thread finishes after signalling stop */
 	stream.reset();
 	stream_encoders.reset();
 	vmix::set_output_event_handler(nullptr);
