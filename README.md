@@ -152,7 +152,9 @@ your installed `obs.dll` / `obs-frontend-api.dll`, so the plugin binary always m
 against a full OBS build tree.
 
 The installer is built with [Inno Setup](https://jrsoftware.org/isinfo.php) from `installer/obs-video-mixes.iss`; CI
-(`.github/workflows/build.yml`) builds, tests and packages every push and drafts a release for `v*` tags.
+(`.github/workflows/build.yml`) builds, tests and packages every push. Every build of `main` publishes the release
+`v<version>` (version from `CMakeLists.txt`): the first build of a version creates it, later builds replace its files.
+Bump the version to start a new release.
 
 ### Layout
 
