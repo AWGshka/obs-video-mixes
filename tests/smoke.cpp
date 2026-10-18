@@ -233,6 +233,17 @@ struct MixUnderTest {
 	video_t *video() const { return obs_canvas_get_video(canvas); }
 };
 
+/* VMIX_SMOKE_SECTIONS=program,recording,outputs,filters,source,encoders,audio,framerate runs only those parts
+ * (default: all), to narrow down a failure. */
+bool section(const char *name)
+{
+	const char *only = std::getenv("VMIX_SMOKE_SECTIONS");
+	if (!only || !*only)
+		return true;
+	const std::string list = std::string(",") + only + ",";
+	return list.find(std::string(",") + name + ",") != std::string::npos;
+}
+
 int failures = 0;
 std::atomic<bool> texture_fallback{false};
 
@@ -685,7 +696,7 @@ int main(int argc, char **argv)
 	obs_transition_set(fade, obs_scene_get_source(main_scene));
 	obs_set_output_source(0, fade);
 
-	{
+	if (section("program") || section("recording") || section("outputs")) {
 		/* ---- program mix ---- */
 		MixUnderTest mix(ovi, W, H, nullptr);
 		if (!mix.ok()) {
@@ -711,11 +722,15 @@ int main(int argc, char **argv)
 		nv12.range = VIDEO_RANGE_PARTIAL;
 		MixUnderTest rec_mix(nv12, W, H, nullptr);
 		const char *tmp = std::getenv("TEMP");
-		const int full = check_recording(rec_mix.video(), tmp ? tmp : ".", 1);
-		const int half = check_recording(rec_mix.video(), tmp ? tmp : ".", 2);
-		check_outputs(rec_mix.video(), tmp ? tmp : ".");
-		expect(full > 0 && half > 0 && std::abs(half * 2 - full) <= full / 5,
-		       "fps divisor 2 encodes half the frames (" + std::to_string(full) + " vs " + std::to_string(half) + ")");
+		if (section("recording")) {
+			const int full = check_recording(rec_mix.video(), tmp ? tmp : ".", 1);
+			const int half = check_recording(rec_mix.video(), tmp ? tmp : ".", 2);
+			expect(full > 0 && half > 0 && std::abs(half * 2 - full) <= full / 5,
+			       "fps divisor 2 encodes half the frames (" + std::to_string(full) + " vs " + std::to_string(half) +
+				       ")");
+		}
+		if (section("outputs"))
+			check_outputs(rec_mix.video(), tmp ? tmp : ".");
 
 		obs_transition_start(fade, OBS_TRANSITION_MODE_AUTO, 3000, obs_scene_get_source(other_scene));
 		wait_ms(1500);
@@ -729,7 +744,7 @@ int main(int argc, char **argv)
 		detach_probe(mix_out);
 	}
 
-	{
+	if (section("filters")) {
 		/* ---- scene filters and hide transitions inside a re-rendered scene ----
 		 * FilteredMain: nested scene "Tinted" at (100,100) = white 200x200 + lime 100x100 (hidden in mix 1),
 		 * with a color-multiply filter on Tinted; a cyan square at (400,40) that is hidden with a fade. */
@@ -799,7 +814,7 @@ int main(int argc, char **argv)
 			obs_source_release(s);
 	}
 
-	{
+	if (section("source")) {
 		/* ---- source mix, not placed anywhere: the source at its own size ---- */
 		obs_source_t *loose = color("loose", 0xFFFF00FF, 64, 48); /* magenta, in no scene */
 		MixUnderTest mix(ovi, 64, 48, obs_source_get_uuid(loose));
@@ -822,8 +837,9 @@ int main(int argc, char **argv)
 		size_t depth;
 		int r, g, b;
 	};
-	for (const PlacedCase &c : {PlacedCase{"cropped blue (120x120, 10px crop)", blue, 100, 100, 1, 0, 0, 255},
-				    PlacedCase{"green 100x100 inside nested scene scaled 2x", green, 200, 200, 2, 0, 255, 0}}) {
+	for (const PlacedCase &c : section("source") ? std::vector<PlacedCase>{PlacedCase{"cropped blue (120x120, 10px crop)", blue, 100, 100, 1, 0, 0, 255},
+				    PlacedCase{"green 100x100 inside nested scene scaled 2x", green, 200, 200, 2, 0, 255, 0}}
+									 : std::vector<PlacedCase>{}) {
 		const vmix::ItemPath path = vmix::find_item_path(obs_source_get_uuid(c.source));
 		vmix::PlacedItem placed;
 		const bool ok = vmix::place_item(path, placed);
@@ -844,9 +860,12 @@ int main(int argc, char **argv)
 		detach_probe(out);
 	}
 
-	check_encoders();
-	check_source_audio();
-	check_frame_rate_rules(blue);
+	if (section("encoders"))
+		check_encoders();
+	if (section("audio"))
+		check_source_audio();
+	if (section("framerate"))
+		check_frame_rate_rules(blue);
 
 	/* ---- teardown ---- */
 	obs_set_output_source(0, nullptr);

@@ -49,8 +49,23 @@ jobs:
       # Headless libobs + D3D11 render checks. GitHub runners have no GPU (WARP only), so a failure here is reported
       # but does not block the build; run ctest locally before releasing.
       - name: Smoke test
+        id: smoke
         continue-on-error: true
         run: ctest --preset windows
+
+      # On failure, run each part of the smoke test alone ("none" = load OBS modules only) to narrow it down.
+      - name: Narrow down smoke failures
+        if: steps.smoke.outcome == 'failure'
+        continue-on-error: true
+        shell: pwsh
+        working-directory: ${{ env.OBS_DIR }}/bin/64bit
+        run: |
+          $env:PATH = "$PWD;$env:PATH"
+          foreach ($s in 'none','program','recording','outputs','filters','source','encoders','audio','framerate') {
+            $env:VMIX_SMOKE_SECTIONS = $s
+            $out = & "${{ github.workspace }}/build/vmix-smoke.exe" "${{ env.OBS_DIR }}" "${{ github.workspace }}/build/obs-video-mixes.dll" "${{ github.workspace }}/data" 2>&1
+            "${s}: " + (($out | Select-String 'FAIL|allocations left') -join ' | ')
+          }
 
       - name: Package
         shell: pwsh
