@@ -69,6 +69,17 @@ const char *draw_technique(bool upscale, enum gs_color_space current, enum gs_co
 	return upscale ? "DrawUpscale" : "Draw";
 }
 
+/*
+ * libobs' transition_active() reads private state. A scene item's show/hide transition is added as an active child
+ * of its scene for exactly as long as it plays (obs_sceneitem_do_transition / obs_sceneitem_transition_stop), so for
+ * the program (active) scenes a mix renders, "active" is the same thing. Item transitions are private sources, which
+ * emit no global signals, so this cannot be tracked through signals instead.
+ */
+bool transition_active(obs_source_t *transition)
+{
+	return transition && obs_source_active(transition);
+}
+
 float sdr_multiplier(enum gs_color_space current, enum gs_color_space source)
 {
 	const bool src_sdr = source == GS_CS_SRGB || source == GS_CS_SRGB_16F || source == GS_CS_709_EXTENDED;
@@ -139,6 +150,7 @@ void MixRenderer::render(uint32_t cx, uint32_t cy)
 	}
 
 	sweep_targets();
+	filters_.end_frame();
 	release_frame();
 }
 
@@ -229,28 +241,47 @@ void MixRenderer::draw_source(obs_source_t *source)
 	if (it == node_index_.end() || !nodes_[it->second].has_hidden)
 		obs_source_video_render(source);
 	else
-		draw_node(nodes_[it->second]);
+		draw_scene(nodes_[it->second]);
 }
 
-/* Mirrors scene_video_render(): items bottom to top, skipping the ones hidden in this mix. */
+void MixRenderer::draw_scene(const Node &node)
+{
+	if (!filters_.render(node.source, [&] { draw_node(node); }))
+		draw_node(node);
+}
+
+/* Mirrors scene_video_render(): items bottom to top, skipping the ones hidden in this mix. Items that are
+ * being hidden with a hide transition stay until it ends, as in libobs. */
 void MixRenderer::draw_node(const Node &node)
 {
 	gs_blend_state_push();
 	gs_reset_blend_state();
 	for (uint32_t i = node.first, end = node.first + node.count; i < end; i++) {
 		const Item &item = items_[i];
-		if (item.visible && !(item.mask & bit_))
+		if (item.mask & bit_)
+			continue;
+		if (item.visible || transition_active(obs_sceneitem_get_transition(item.item, false)))
 			draw_item(item);
 	}
 	gs_blend_state_pop();
 }
 
+/* The item's own content, or its show/hide transition while one plays (render_item in libobs/obs-scene.c). */
 void MixRenderer::draw_content(const Item &item)
 {
-	if (item.child >= 0 && nodes_[item.child].has_hidden)
-		draw_node(nodes_[item.child]);
-	else
+	const bool rerender = item.child >= 0 && nodes_[item.child].has_hidden;
+
+	/* A transition renders its child through libobs, which would bring hidden items back: a re-rendered
+	 * subtree skips the animation instead. */
+	obs_source_t *transition = rerender ? nullptr : obs_sceneitem_get_transition(item.item, item.visible);
+	if (transition_active(transition)) {
+		obs_transition_set_size(transition, obs_source_get_width(item.source), obs_source_get_height(item.source));
+		obs_source_video_render(transition);
+	} else if (rerender) {
+		draw_scene(nodes_[item.child]);
+	} else {
 		obs_source_video_render(item.source);
+	}
 }
 
 /* Mirrors render_item() in libobs/obs-scene.c, using renderer-owned render targets. */

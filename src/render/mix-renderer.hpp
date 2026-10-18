@@ -1,5 +1,7 @@
 #pragma once
 
+#include "render/scene-filters.hpp"
+
 #include <obs.h>
 
 #include <atomic>
@@ -15,8 +17,9 @@ namespace vmix {
  * libobs caches scene item / nested scene / transition renders once per frame (reset in the tick), so a
  * second render of the same scene graph in the same frame would reuse textures that still contain the
  * hidden items. This renderer therefore walks the scene graph itself for every subtree that contains a
- * hidden item, using its own per-item render targets and the item's live transform, crop, scale filter
- * and blend settings. Subtrees without hidden items are drawn through libobs (sharing its caches), and if
+ * hidden item, using its own per-item render targets and the item's live transform, crop, scale filter,
+ * blend settings and show/hide transitions; filters on such scenes run as private copies (SceneFilters).
+ * Subtrees without hidden items are drawn through libobs (sharing its caches), and if
  * nothing is hidden at all the finished main texture is reused, so an unused mix costs a single blit.
  *
  * All methods except set_fade() must be called on the graphics thread inside a graphics context.
@@ -69,6 +72,7 @@ private:
 	void release_frame();
 
 	void draw_source(obs_source_t *source);
+	void draw_scene(const Node &node); /* draw_node through the scene's own filters */
 	void draw_node(const Node &node);
 	void draw_item(const Item &item);
 	void draw_content(const Item &item);
@@ -95,6 +99,8 @@ private:
 	gs_effect_t *fade_effect_ = nullptr;
 	gs_samplerstate_t *point_sampler_ = nullptr;
 	bool fade_effect_failed_ = false;
+
+	SceneFilters filters_;
 };
 
 } // namespace vmix

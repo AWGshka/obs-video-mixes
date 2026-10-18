@@ -39,6 +39,7 @@ target_sources(
     src/render/geometry.cpp
     src/render/mix-renderer.cpp
     src/render/root-source.cpp
+    src/render/scene-filters.cpp
     src/ui/dock.cpp
     src/ui/mix-settings-dialog.cpp
     src/ui/preview.cpp

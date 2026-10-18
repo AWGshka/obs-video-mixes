@@ -1,5 +1,6 @@
 #include "core/manager.hpp"
 #include "render/root-source.hpp"
+#include "render/scene-filters.hpp"
 #include "ui/dock.hpp"
 
 #include <obs-frontend-api.h>
@@ -21,6 +22,7 @@ MODULE_EXPORT const char *obs_module_description(void)
 bool obs_module_load(void)
 {
 	vmix::register_root_source();
+	vmix::register_scene_filter_proxy();
 
 	/* No main window when libobs is used headless (e.g. the smoke test). */
 	if (obs_frontend_get_main_window())

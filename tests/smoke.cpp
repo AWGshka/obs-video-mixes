@@ -7,12 +7,14 @@
  *   2. items without hidden content render identically in both (blue square, background)
  *   3. mid-transition to a scene without hidden items, the mix fades from the *clean* scene
  *   4. after the transition nothing differs and the mix equals program (fast path)
+ *   5. a filter on a re-rendered (nested) scene applies in the mix and follows settings / enable changes
+ *   6. an item hidden with a hide transition fades out in the mix like in program
  * Source mix
- *   5. a mix of the 120x120 blue source is a 120x120 canvas filled by that source (no layout, no black)
+ *   7. a mix of the 120x120 blue source is a 120x120 canvas filled by that source (no layout, no black)
  * Encoders (OBS' real encoder plugins)
- *   6. preferred encoder is a GPU encoder when one exists; deprecated ids (jim_nvenc) are never selectable
- *   7. every selectable encoder with rate control gets a constant-quality mode, never CBR
- *   8. the preferred encoder records a mix canvas to a file
+ *   8. preferred encoder is a GPU encoder when one exists; deprecated ids (jim_nvenc) are never selectable
+ *   9. every selectable encoder with rate control gets a constant-quality mode, never CBR
+ *  10. the preferred encoder records a mix canvas to a file
  *
  * Usage: vmix-smoke <obs install dir> <plugin dll> <plugin data dir>   (cwd = <obs>/bin/64bit)
  */
@@ -107,9 +109,53 @@ Pixel sample(Probe &p, size_t i)
 	return p.at[i];
 }
 
+/* OBS_TASK_UI tasks (filter copies, output stop events) run on the main thread while it waits. */
+struct UiTask {
+	obs_task_t task;
+	void *param;
+	std::atomic<bool> *done;
+};
+std::mutex ui_mutex;
+std::vector<UiTask> ui_tasks;
+std::thread::id main_thread;
+
+void ui_task_handler(obs_task_t task, void *param, bool wait)
+{
+	if (std::this_thread::get_id() == main_thread) {
+		task(param);
+		return;
+	}
+	std::atomic<bool> done{false};
+	{
+		std::lock_guard lock(ui_mutex);
+		ui_tasks.push_back({task, param, wait ? &done : nullptr});
+	}
+	while (wait && !done)
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+}
+
+void pump_ui()
+{
+	std::vector<UiTask> tasks;
+	{
+		std::lock_guard lock(ui_mutex);
+		tasks.swap(ui_tasks);
+	}
+	for (UiTask &t : tasks) {
+		t.task(t.param);
+		if (t.done)
+			*t.done = true;
+	}
+}
+
 void wait_ms(int ms)
 {
-	std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+	const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
+	while (std::chrono::steady_clock::now() < end) {
+		pump_ui();
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	pump_ui();
 }
 
 obs_source_t *color(const char *name, uint32_t abgr, uint32_t cx, uint32_t cy)
@@ -314,6 +360,8 @@ int main(int argc, char **argv)
 	base_set_log_handler(log_handler, nullptr);
 	if (!obs_startup("en-US", nullptr, nullptr))
 		return 3;
+	main_thread = std::this_thread::get_id();
+	obs_set_ui_task_handler(ui_task_handler);
 
 	/* libobs loads modules with the restricted DLL search path, so use an absolute path. */
 	const std::string d3d11 = obs_dir + "/bin/64bit/libobs-d3d11";
@@ -342,6 +390,7 @@ int main(int argc, char **argv)
 	if (!load_module(plugins + "image-source.dll", data + "image-source") ||
 	    !load_module(plugins + "obs-transitions.dll", data + "obs-transitions") ||
 	    !load_module(plugins + "obs-ffmpeg.dll", data + "obs-ffmpeg") ||
+	    !load_module(plugins + "obs-filters.dll", data + "obs-filters") ||
 	    !load_module(plugins + "obs-x264.dll", data + "obs-x264") || !load_module(argv[2], argv[3]))
 		return 5;
 	load_module(plugins + "obs-nvenc.dll", data + "obs-nvenc", false);
@@ -370,8 +419,10 @@ int main(int argc, char **argv)
 	place(other_scene, yellow, 0, 0);
 
 	/* Hide the green square in mix 1 (what the dock writes). */
-	OBSDataAutoRelease priv = obs_sceneitem_get_private_settings(green_item);
-	obs_data_set_int(priv, "video_mixes_hidden", 1 << 1);
+	{
+		OBSDataAutoRelease priv = obs_sceneitem_get_private_settings(green_item);
+		obs_data_set_int(priv, "video_mixes_hidden", 1 << 1);
+	}
 
 	obs_source_t *fade = obs_source_create("fade_transition", "Fade", nullptr, nullptr);
 	obs_transition_set(fade, obs_scene_get_source(main_scene));
@@ -418,6 +469,76 @@ int main(int argc, char **argv)
 
 		detach_probe(program_out);
 		detach_probe(mix_out);
+	}
+
+	{
+		/* ---- scene filters and hide transitions inside a re-rendered scene ----
+		 * FilteredMain: nested scene "Tinted" at (100,100) = white 200x200 + lime 100x100 (hidden in mix 1),
+		 * with a color-multiply filter on Tinted; a cyan square at (400,40) that is hidden with a fade. */
+		obs_source_t *white = color("white", 0xFFFFFFFF, 200, 200);
+		obs_source_t *lime = color("lime", 0xFF00FF00, 100, 100);
+		obs_source_t *cyan = color("cyan", 0xFFFFFF00, 60, 60);
+		obs_scene_t *tinted = obs_scene_create("Tinted");
+		place(tinted, white, 0, 0);
+		obs_sceneitem_t *lime_item = place(tinted, lime, 0, 0);
+		OBSDataAutoRelease lime_priv = obs_sceneitem_get_private_settings(lime_item);
+		obs_data_set_int(lime_priv, "video_mixes_hidden", 1 << 1);
+
+		OBSDataAutoRelease fs = obs_data_create();
+		obs_data_set_int(fs, "color_multiply", 0xFF0000FF); /* ABGR red */
+		obs_source_t *tint = obs_source_create("color_filter_v2", "tint", fs, nullptr);
+		obs_source_filter_add(obs_scene_get_source(tinted), tint);
+
+		obs_scene_t *filtered = obs_scene_create("FilteredMain");
+		place(filtered, obs_scene_get_source(tinted), 100, 100);
+		obs_sceneitem_t *cyan_item = place(filtered, cyan, 400, 40);
+		obs_source_t *hide_fade = obs_source_create_private("fade_transition", "hide-fade", nullptr);
+		obs_sceneitem_set_transition(cyan_item, false, hide_fade);
+		obs_sceneitem_set_transition_duration(cyan_item, false, 3000);
+		obs_transition_set(fade, obs_scene_get_source(filtered));
+
+		MixUnderTest mix(ovi, W, H, nullptr);
+		const std::vector<std::pair<int, int>> points{{150, 150}, {250, 250}, {430, 70}};
+		Probe program(points), mixp(points);
+		obs_output_t *program_out = attach_probe(program, obs_get_video(), "filter-program-probe");
+		obs_output_t *mix_out = attach_probe(mixp, mix.video(), "filter-mix-probe");
+		wait_ms(1500);
+
+		std::printf("\nscene filters in a re-rendered scene:\n");
+		expect(is(sample(program, 1), 255, 0, 0), "program: white tinted red by the scene filter", sample(program, 1));
+		expect(is(sample(mixp, 1), 255, 0, 0), "mix: scene filter applied to the re-rendered scene", sample(mixp, 1));
+		expect(is(sample(program, 0), 0, 0, 0), "program: lime x red = black", sample(program, 0));
+		expect(is(sample(mixp, 0), 255, 0, 0), "mix: lime hidden, white below tinted red", sample(mixp, 0));
+
+		obs_data_set_int(fs, "color_multiply", 0xFFFF0000); /* ABGR blue */
+		obs_source_update(tint, fs);
+		wait_ms(500);
+		expect(is(sample(program, 1), 0, 0, 255), "program follows filter settings changes", sample(program, 1));
+		expect(is(sample(mixp, 1), 0, 0, 255), "mix follows filter settings changes", sample(mixp, 1));
+		obs_source_set_enabled(tint, false);
+		wait_ms(500);
+		expect(is(sample(mixp, 1), 255, 255, 255), "mix follows filter enable/disable", sample(mixp, 1));
+		obs_source_set_enabled(tint, true);
+
+		std::printf("\nshow/hide transitions in a re-rendered scene:\n");
+		expect(is(sample(mixp, 2), 0, 255, 255), "cyan item visible before hiding", sample(mixp, 2));
+		obs_sceneitem_set_visible(cyan_item, false);
+		wait_ms(1500);
+		const Pixel pp = sample(program, 2), mp = sample(mixp, 2);
+		expect(mp.g > 40 && mp.g < 215 && std::abs(mp.g - pp.g) < 48,
+		       "mid hide-fade: mix fades the item out like program (program g=" + std::to_string(pp.g) + ")");
+		wait_ms(2500);
+		expect(is(sample(mixp, 2), 0, 0, 0), "after the hide transition the item is gone", sample(mixp, 2));
+
+		detach_probe(program_out);
+		detach_probe(mix_out);
+		obs_transition_set(fade, obs_scene_get_source(main_scene));
+		for (obs_scene_t *scene : {filtered, tinted}) {
+			obs_source_remove(obs_scene_get_source(scene));
+			obs_scene_release(scene);
+		}
+		for (obs_source_t *s : {white, lime, cyan, tint, hide_fade})
+			obs_source_release(s);
 	}
 
 	{
@@ -477,7 +598,10 @@ int main(int argc, char **argv)
 	}
 	for (obs_source_t *s : {red, green, blue, yellow})
 		obs_source_release(s);
+	wait_ms(100); /* queued UI tasks (retired filter copies, stop events) */
 	obs_shutdown();
+	std::printf("\nshutdown:\n");
+	expect(bnum_allocs() == 0, "no libobs memory leaks (" + std::to_string(bnum_allocs()) + " allocations left)");
 
 	std::printf(failures ? "\n%d check(s) FAILED\n" : "\nall checks passed\n", failures);
 	return failures ? 1 : 0;
