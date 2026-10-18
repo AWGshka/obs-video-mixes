@@ -38,6 +38,7 @@ target_sources(
     src/core/outputs.cpp
     src/core/source-audio.cpp
     src/core/visibility.cpp
+    src/core/websocket.cpp
     src/render/geometry.cpp
     src/render/mix-renderer.cpp
     src/render/root-source.cpp

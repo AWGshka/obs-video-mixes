@@ -1,4 +1,5 @@
 #include "core/manager.hpp"
+#include "core/websocket.hpp"
 #include "render/root-source.hpp"
 #include "render/scene-filters.hpp"
 #include "ui/dock.hpp"
@@ -36,9 +37,11 @@ bool obs_module_load(void)
 void obs_module_post_load(void)
 {
 	vmix::Manager::get().init();
+	vmix::register_websocket_vendor();
 }
 
 void obs_module_unload(void)
 {
+	vmix::unregister_websocket_vendor();
 	vmix::Manager::get().shutdown();
 }
