@@ -1,0 +1,8 @@
+/.deps/
+/build/
+/dist/
+CMakeUserPresets.json
+.vs/
+.vscode/
+.idea/
+/.cache/
