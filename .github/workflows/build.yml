@@ -61,7 +61,9 @@ jobs:
         working-directory: ${{ env.OBS_DIR }}/bin/64bit
         run: |
           $env:PATH = "$PWD;$env:PATH"
-          foreach ($s in 'none','program','recording','outputs','filters','source','encoders','audio','framerate') {
+          $parts = 'program','recording','outputs','filters','source','encoders','audio','framerate'
+          $runs = @('none') + $parts + (1..($parts.Count - 1) | ForEach-Object { $parts[0..$_] -join ',' })
+          foreach ($s in $runs) {
             $env:VMIX_SMOKE_SECTIONS = $s
             $out = & "${{ github.workspace }}/build/vmix-smoke.exe" "${{ env.OBS_DIR }}" "${{ github.workspace }}/build/obs-video-mixes.dll" "${{ github.workspace }}/data" 2>&1
             "${s}: " + (($out | Select-String 'FAIL|allocations left') -join ' | ')
