@@ -26,7 +26,6 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-LicenseFile=..\LICENSE
 OutputDir={#OutputDir}
 OutputBaseFilename=obs-video-mixes-{#AppVersion}-windows-x64-installer
 Compression=lzma2

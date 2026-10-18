@@ -167,7 +167,3 @@ tests/smoke.cpp              end-to-end checks on real libobs (CTest)
 cmake/obs-sdk.cmake          SDK setup against the installed OBS
 installer/                   Inno Setup script
 ```
-
-## License
-
-GPL-2.0-or-later, like OBS Studio. See [LICENSE](LICENSE).
