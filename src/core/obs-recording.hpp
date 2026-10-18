@@ -14,4 +14,10 @@ namespace vmix {
  */
 bool inherit_obs_recording(MixConfig &cfg);
 
+/*
+ * Copies OBS' streaming encoder (with its bitrate and rate control) and stream audio track/bitrate into the mix's stream
+ * settings. The server and key are not copied: a mix streams somewhere else. Returns false if nothing usable was found.
+ */
+bool inherit_obs_stream(MixConfig &cfg);
+
 } // namespace vmix

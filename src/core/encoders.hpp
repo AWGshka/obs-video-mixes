@@ -25,6 +25,9 @@ std::string preferred_video_encoder();
 /* Fresh settings for a local recording: the encoder's constant-quality mode, if it has one (+1 reference). */
 obs_data_t *recording_defaults(const char *encoder_id);
 
+/* Fresh settings for streaming: constant bitrate (what streaming services expect), 2 s keyframes (+1 reference). */
+obs_data_t *stream_defaults(const char *encoder_id, int bitrate_kbps = 6000);
+
 /*
  * Switches settings to the encoder's constant-quality rate control (CQP / CRF / CQVBR ...) with a sensible quality
  * level, read from the encoder's own property list. Returns false if the encoder exposes no such mode.

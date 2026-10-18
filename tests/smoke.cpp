@@ -15,14 +15,24 @@
  *   8. preferred encoder is a GPU encoder when one exists; deprecated ids (jim_nvenc) are never selectable
  *   9. every selectable encoder with rate control gets a constant-quality mode, never CBR
  *  10. the preferred encoder records a mix canvas to a file
+ * Outputs
+ *  11. a recording and a replay buffer share one encoder set; the replay saves a file, both stop cleanly
+ *  12. stream encoders default to CBR; an unreachable server ends the stream with an error, not a hang
+ *  13. a source's own audio (volume and mute applied) becomes a track on the OBS clock
+ * Shutdown
+ *  14. no libobs allocations are left
  *
  * Usage: vmix-smoke <obs install dir> <plugin dll> <plugin data dir>   (cwd = <obs>/bin/64bit)
  */
 #include "core/encoders.hpp"
 #include "core/frame-rate.hpp"
 #include "core/item-path.hpp"
+#include "core/outputs.hpp"
+#include "core/source-audio.hpp"
+#include "core/util.hpp"
 
 #include <obs.hpp>
+#include <media-io/audio-io.h>
 #include <util/platform.h>
 
 #ifdef _WIN32
@@ -31,6 +41,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -339,7 +350,248 @@ void check_frame_rate_rules(obs_source_t *sync_source)
 	expect(vmix::resolve_frame_rate(m, nullptr).divisor == 1, "auto: program mixes record at OBS fps");
 }
 
+/* ---- outputs ---- */
+
+struct OutputEventRecord {
+	uint64_t token;
+	vmix::OutputEvent event;
+	int code;
+	std::string text;
+};
+std::mutex events_mutex;
+std::vector<OutputEventRecord> output_events;
+
+void on_output_event(uint64_t token, vmix::OutputEvent event, int code, const std::string &text)
+{
+	std::lock_guard lock(events_mutex);
+	output_events.push_back({token, event, code, text});
+}
+
+bool wait_event(uint64_t token, vmix::OutputEvent event, int timeout_ms, int *code = nullptr, std::string *text = nullptr)
+{
+	const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+	while (std::chrono::steady_clock::now() < end) {
+		pump_ui();
+		{
+			std::lock_guard lock(events_mutex);
+			for (const OutputEventRecord &e : output_events) {
+				if (e.token != token || e.event != event)
+					continue;
+				if (code)
+					*code = e.code;
+				if (text)
+					*text = e.text;
+				return true;
+			}
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	return false;
+}
+
+void check_outputs(video_t *video, const std::string &dir)
+{
+	std::printf("\nrecording + replay buffer on shared encoders:\n");
+	vmix::set_output_event_handler(on_output_event);
+
+	vmix::EncoderSpec spec;
+	spec.name = "smoke-files";
+	spec.encoder_id = vmix::preferred_video_encoder();
+	spec.encoder_settings = vmix::adopt(vmix::recording_defaults(spec.encoder_id.c_str()));
+	spec.audio_tracks = 1;
+	std::string error;
+	std::shared_ptr<vmix::EncoderSet> encoders = vmix::EncoderSet::create(spec, video, 1, error);
+	expect(encoders != nullptr, "encoder set created " + error);
+	if (!encoders)
+		return;
+
+	vmix::OutputSpec rec;
+	rec.name = "smoke-record";
+	rec.path = dir + "/vmix-smoke-shared.mkv";
+	os_unlink(rec.path.c_str());
+	auto record = vmix::MixOutput::start(vmix::OutputKind::Record, rec, encoders, 1, error);
+	expect(record != nullptr, "recording started " + error);
+
+	vmix::OutputSpec rb;
+	rb.name = "smoke-replay";
+	rb.directory = dir;
+	rb.filename_format = "vmix-smoke-replay %hh-%mm-%ss";
+	rb.extension = "mkv";
+	rb.max_seconds = 10;
+	rb.max_mb = 64;
+	auto replay = vmix::MixOutput::start(vmix::OutputKind::Replay, rb, encoders, 2, error);
+	expect(replay != nullptr, "replay buffer started on the same encoders " + error);
+	encoders.reset(); /* the outputs keep them alive */
+
+	wait_ms(2500);
+	if (replay) {
+		expect(replay->save_replay(), "replay save requested");
+		std::string path;
+		const bool saved = wait_event(2, vmix::OutputEvent::ReplaySaved, 8000, nullptr, &path);
+		const int64_t size = saved ? os_get_file_size(path.c_str()) : 0;
+		expect(saved && size > 0, "replay saved: " + path + " (" + std::to_string(size) + " bytes)");
+		if (saved)
+			os_unlink(path.c_str());
+		replay->stop();
+		expect(wait_event(2, vmix::OutputEvent::Stopped, 5000), "replay buffer stopped");
+	}
+	if (record) {
+		record->stop();
+		int code = -1;
+		const bool stopped = wait_event(1, vmix::OutputEvent::Stopped, 5000, &code);
+		expect(stopped && code == OBS_OUTPUT_SUCCESS, "recording finished cleanly (code " + std::to_string(code) + ")");
+		const int frames = record->total_frames();
+		expect(frames > 60 && os_get_file_size(rec.path.c_str()) > 0,
+		       "recording kept encoding next to the replay buffer: " + std::to_string(frames) + " frames");
+		os_unlink(rec.path.c_str());
+	}
+	record.reset();
+	replay.reset();
+
+	std::printf("\nstream output:\n");
+	vmix::EncoderSpec sspec = spec;
+	sspec.name = "smoke-stream";
+	sspec.encoder_settings = vmix::adopt(vmix::stream_defaults(sspec.encoder_id.c_str(), 2500));
+	expect(std::strcmp(obs_data_get_string(sspec.encoder_settings, "rate_control"), "CBR") == 0,
+	       std::string("stream encoder defaults to CBR: ") + obs_data_get_json(sspec.encoder_settings));
+	std::shared_ptr<vmix::EncoderSet> stream_encoders = vmix::EncoderSet::create(sspec, video, 1, error);
+	vmix::OutputSpec st;
+	st.name = "smoke-stream";
+	st.server = "rtmp://127.0.0.1:1/live";
+	st.key = "smoke";
+	auto stream = stream_encoders
+			      ? vmix::MixOutput::start(vmix::OutputKind::Stream, st, stream_encoders, 3, error)
+			      : nullptr;
+	if (stream) {
+		int code = 0;
+		const bool stopped = wait_event(3, vmix::OutputEvent::Stopped, 20000, &code);
+		expect(stopped && code != OBS_OUTPUT_SUCCESS,
+		       "unreachable server: the stream stops with an error (code " + std::to_string(code) + ")");
+	} else {
+		expect(!error.empty(), "unreachable server: start fails with a message: " + error);
+	}
+	stream.reset();
+	stream_encoders.reset();
+	vmix::set_output_event_handler(nullptr);
+}
+
+/* ---- source audio ---- */
+
+/* An audio-only source playing a 440 Hz sine (amplitude 0.5) with real-time timestamps. */
+struct Tone {
+	obs_source_t *source;
+	std::atomic<bool> run{true};
+	std::thread thread;
+};
+
+void register_tone_source()
+{
+	obs_source_info info = {};
+	info.id = "vmix_tone";
+	info.type = OBS_SOURCE_TYPE_INPUT;
+	info.output_flags = OBS_SOURCE_AUDIO;
+	info.get_name = [](void *) { return "tone"; };
+	info.create = [](obs_data_t *, obs_source_t *source) -> void * {
+		auto *tone = new Tone{source};
+		tone->thread = std::thread([tone] {
+			constexpr uint32_t rate = 48000, frames = 480;
+			std::vector<float> buf(frames);
+			const uint64_t start = os_gettime_ns();
+			uint64_t n = 0;
+			while (tone->run) {
+				for (uint32_t i = 0; i < frames; i++)
+					buf[i] = 0.5f * std::sin(6.2831853f * 440.0f * (float)(n + i) / (float)rate);
+				obs_source_audio a = {};
+				a.data[0] = a.data[1] = reinterpret_cast<const uint8_t *>(buf.data());
+				a.frames = frames;
+				a.speakers = SPEAKERS_STEREO;
+				a.format = AUDIO_FORMAT_FLOAT_PLANAR;
+				a.samples_per_sec = rate;
+				a.timestamp = start + audio_frames_to_ns(rate, n);
+				obs_source_output_audio(tone->source, &a);
+				n += frames;
+				os_sleepto_ns(start + audio_frames_to_ns(rate, n));
+			}
+		});
+		return tone;
+	};
+	info.destroy = [](void *data) {
+		auto *tone = static_cast<Tone *>(data);
+		tone->run = false;
+		tone->thread.join();
+		delete tone;
+	};
+	obs_register_source(&info);
+}
+
+struct AudioProbe {
+	std::mutex mutex;
+	double rms = 0.0;
+	uint64_t last_ts = 0;
+	uint64_t received_at = 0;
+};
+
+void on_probe_audio(void *param, size_t, audio_data *data)
+{
+	auto *p = static_cast<AudioProbe *>(param);
+	const float *s = reinterpret_cast<const float *>(data->data[0]);
+	double sum = 0.0;
+	for (uint32_t i = 0; i < data->frames; i++)
+		sum += (double)s[i] * s[i];
+	std::lock_guard lock(p->mutex);
+	p->rms = data->frames ? std::sqrt(sum / data->frames) : 0.0;
+	p->last_ts = data->timestamp;
+	p->received_at = os_gettime_ns();
+}
+
+void check_source_audio()
+{
+	std::printf("\nsource audio (a source's own audio as a track):\n");
+	obs_source_t *tone = obs_source_create("vmix_tone", "tone", nullptr, nullptr);
+	std::string error;
+	auto audio = vmix::SourceAudio::create(tone, error);
+	expect(audio != nullptr, "source audio created " + error);
+	if (!audio) {
+		obs_source_release(tone);
+		return;
+	}
+	AudioProbe probe;
+	audio_output_connect(audio->audio(), 0, nullptr, on_probe_audio, &probe);
+	wait_ms(1500);
+	{
+		std::lock_guard lock(probe.mutex);
+		const double lag_ms = (double)(probe.received_at - probe.last_ts) / 1e6;
+		expect(probe.rms > 0.3 && probe.rms < 0.4,
+		       "the source's sine arrives on the track (rms " + std::to_string(probe.rms) + ")");
+		expect(lag_ms > 250.0 && lag_ms < 450.0,
+		       "timestamps stay on the OBS clock, a fixed delay behind real time (" + std::to_string(lag_ms) +
+			       " ms)");
+	}
+	obs_source_set_volume(tone, 0.5f);
+	wait_ms(800);
+	{
+		std::lock_guard lock(probe.mutex);
+		expect(probe.rms > 0.15 && probe.rms < 0.2,
+		       "the source's volume applies (rms " + std::to_string(probe.rms) + " at 50%)");
+	}
+	obs_source_set_muted(tone, true);
+	wait_ms(800);
+	{
+		std::lock_guard lock(probe.mutex);
+		expect(probe.rms < 0.001, "muting the source silences its track (rms " + std::to_string(probe.rms) + ")");
+	}
+	audio_output_disconnect(audio->audio(), 0, on_probe_audio, &probe);
+	audio.reset();
+	obs_source_release(tone);
+}
+
 } // namespace
+
+/* The core files linked into this test look up their (error) texts through the module API. */
+extern "C" const char *obs_module_text(const char *lookup)
+{
+	return lookup;
+}
 
 int main(int argc, char **argv)
 {
@@ -391,11 +643,14 @@ int main(int argc, char **argv)
 	    !load_module(plugins + "obs-transitions.dll", data + "obs-transitions") ||
 	    !load_module(plugins + "obs-ffmpeg.dll", data + "obs-ffmpeg") ||
 	    !load_module(plugins + "obs-filters.dll", data + "obs-filters") ||
+	    !load_module(plugins + "obs-outputs.dll", data + "obs-outputs") ||
+	    !load_module(plugins + "rtmp-services.dll", data + "rtmp-services") ||
 	    !load_module(plugins + "obs-x264.dll", data + "obs-x264") || !load_module(argv[2], argv[3]))
 		return 5;
 	load_module(plugins + "obs-nvenc.dll", data + "obs-nvenc", false);
 	load_module(plugins + "obs-qsv11.dll", data + "obs-qsv11", false);
 	register_probe_output();
+	register_tone_source();
 
 	/* ---- scene graph ---- */
 	obs_source_t *red = color("red", 0xFF0000FF, W, H);
@@ -456,6 +711,7 @@ int main(int argc, char **argv)
 		const char *tmp = std::getenv("TEMP");
 		const int full = check_recording(rec_mix.video(), tmp ? tmp : ".", 1);
 		const int half = check_recording(rec_mix.video(), tmp ? tmp : ".", 2);
+		check_outputs(rec_mix.video(), tmp ? tmp : ".");
 		expect(full > 0 && half > 0 && std::abs(half * 2 - full) <= full / 5,
 		       "fps divisor 2 encodes half the frames (" + std::to_string(full) + " vs " + std::to_string(half) + ")");
 
@@ -587,6 +843,7 @@ int main(int argc, char **argv)
 	}
 
 	check_encoders();
+	check_source_audio();
 	check_frame_rate_rules(blue);
 
 	/* ---- teardown ---- */

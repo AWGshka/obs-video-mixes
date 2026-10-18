@@ -3,6 +3,7 @@
 #include <obs.hpp>
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -14,9 +15,16 @@ constexpr int kAudioTracks = 6;
 
 /* Program: the program output minus hidden items. Source: one source by itself at its own resolution. */
 enum class MixKind : int { Program = 0, Source = 1 };
-enum class Trigger : int { Manual = 0, Recording = 1, Streaming = 2 };
+/* When an output starts and stops: together with an OBS output, or only by hand (dock, hotkey, websocket). */
+enum class Trigger : int { Manual = 0, Recording = 1, Streaming = 2, ReplayBuffer = 3 };
 enum class Container : int { Mkv = 0, Mp4 = 1, Mov = 2, HybridMp4 = 3, HybridMov = 4 };
 enum class TransitionStyle : int { Fade = 0, Cut = 1 };
+/* Audio of a source mix: the selected mixer tracks, or only the source's own audio. */
+enum class AudioSource : int { Tracks = 0, Source = 1 };
+
+/* Hotkey ids per mix (registered as "VideoMixes.<name>.<mix id>"). */
+inline constexpr const char *kHotkeyNames[] = {"Start", "Stop", "ReplayStart", "ReplayStop",
+					       "ReplaySave", "StreamStart", "StreamStop"};
 
 struct MixConfig {
 	uint32_t id = 0;
@@ -34,22 +42,40 @@ struct MixConfig {
 	/* Output fps = OBS fps / divisor. 0 = auto: the source's own frame rate (source mixes) or OBS fps. */
 	uint32_t fps_divisor = 0;
 
-	Trigger trigger = Trigger::Recording;
 	TransitionStyle transitions = TransitionStyle::Fade;
 
+	/* ---- file recording (and replay buffer: same encoders, format and folder) ---- */
+	bool record = true;
+	Trigger trigger = Trigger::Recording;
 	Container container = Container::Mkv;
 	std::string folder; /* empty = OBS recording folder */
-
 	std::string encoder_id;
 	OBSData encoder_settings;
-
 	uint32_t audio_tracks = 1u; /* bit n = mixer track n+1 */
 	int audio_bitrate = 192;
+	AudioSource audio_source = AudioSource::Tracks;
 
-	OBSDataArray hotkey_start;
-	OBSDataArray hotkey_stop;
+	/* ---- replay buffer ---- */
+	bool replay = false;
+	Trigger replay_trigger = Trigger::ReplayBuffer;
+	int replay_seconds = 30;
+	int replay_mb = 512;
+	bool replay_save_with_obs = true; /* saving OBS' replay buffer also saves this mix's */
+
+	/* ---- stream ---- */
+	bool stream = false;
+	Trigger stream_trigger = Trigger::Streaming;
+	std::string stream_server;
+	std::string stream_key;
+	std::string stream_encoder_id;
+	OBSData stream_encoder_settings;
+	int stream_audio_track = 1; /* 1-based mixer track */
+	int stream_audio_bitrate = 160;
+
+	std::map<std::string, OBSDataArray> hotkeys; /* saved bindings by kHotkeyNames entry */
 
 	uint32_t bit() const { return 1u << id; }
+	bool source_audio() const { return kind == MixKind::Source && audio_source == AudioSource::Source; }
 };
 
 struct Config {

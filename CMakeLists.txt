@@ -34,7 +34,8 @@ target_sources(
     src/core/manager.cpp
     src/core/mix-canvas.cpp
     src/core/obs-recording.cpp
-    src/core/recording.cpp
+    src/core/outputs.cpp
+    src/core/source-audio.cpp
     src/core/visibility.cpp
     src/render/geometry.cpp
     src/render/mix-renderer.cpp
@@ -79,7 +80,15 @@ set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY OFF)
 include(CPack)
 
 if(VMIX_BUILD_SMOKE_TEST)
-  add_executable(vmix-smoke tests/smoke.cpp src/core/encoders.cpp src/core/frame-rate.cpp src/core/item-path.cpp)
+  add_executable(
+    vmix-smoke
+    tests/smoke.cpp
+    src/core/encoders.cpp
+    src/core/frame-rate.cpp
+    src/core/item-path.cpp
+    src/core/outputs.cpp
+    src/core/source-audio.cpp
+  )
   target_include_directories(vmix-smoke PRIVATE src)
   target_link_libraries(vmix-smoke PRIVATE OBS::libobs OBS::obs-frontend-api)
   target_compile_definitions(vmix-smoke PRIVATE NOMINMAX _CRT_SECURE_NO_WARNINGS)

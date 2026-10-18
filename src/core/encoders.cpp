@@ -119,6 +119,28 @@ obs_data_t *recording_defaults(const char *encoder_id)
 	return s;
 }
 
+obs_data_t *stream_defaults(const char *encoder_id, int bitrate_kbps)
+{
+	obs_data_t *s = obs_data_create();
+	if (encoder_id && std::strcmp(encoder_id, "obs_x264") == 0)
+		obs_data_set_string(s, "preset", "veryfast");
+
+	OBSProperties props = obs_get_encoder_properties(encoder_id);
+	if (!props)
+		return s;
+	obs_properties_apply_settings(props, s);
+	if (obs_properties_get(props, "keyint_sec"))
+		obs_data_set_int(s, "keyint_sec", 2);
+	obs_property_t *rc = obs_properties_get(props, "rate_control");
+	if (rc && obs_property_get_type(rc) == OBS_PROPERTY_LIST && obs_property_list_format(rc) == OBS_COMBO_FORMAT_STRING &&
+	    list_has(rc, "CBR")) {
+		obs_data_set_string(s, "rate_control", "CBR");
+		obs_property_modified(rc, s);
+	}
+	set_int_clamped(props, s, "bitrate", bitrate_kbps);
+	return s;
+}
+
 namespace {
 
 size_t user_value_count(obs_data_t *d)

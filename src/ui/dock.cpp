@@ -295,10 +295,10 @@ void MixesDock::rebuild_rows(const std::vector<MixState> &states)
 		auto *rec = new QToolButton();
 		rec->setAutoRaise(true);
 		connect(rec, &QToolButton::clicked, this, [id] {
-			if (Manager::get().recording(id))
-				Manager::get().stop_recording(id);
+			if (Manager::get().output_active(id, OutputKind::Record))
+				Manager::get().stop_output(id, OutputKind::Record);
 			else
-				Manager::get().start_recording(id, Trigger::Manual);
+				Manager::get().start_output(id, OutputKind::Record);
 		});
 
 		auto *pv = new QToolButton();
@@ -340,22 +340,23 @@ void MixesDock::update_status()
 		if (it == states.end())
 			continue;
 		const MixState &s = *it;
+		const OutputState &r = s.out(OutputKind::Record);
 		QString text = T(trigger_key(s.cfg.trigger));
 		if (s.cfg.kind == MixKind::Source)
 			text = T("Dock.SourceOf", Q(s.cfg.source_name)) + QStringLiteral(" · ") + text;
 		const char *tone = "text-muted";
 
-		if (s.recording) {
+		if (r.active) {
 			any_recording = true;
-			tone = s.paused ? "text-warning" : "text-danger";
-			text = s.paused ? T("Dock.Paused") : format_duration(now - s.started_ns);
+			tone = r.paused ? "text-warning" : "text-danger";
+			text = r.paused ? T("Dock.Paused") : format_duration(now - r.started_ns);
 			if (s.fps > 0.0)
 				text += QStringLiteral(" · ") + T("Dock.Fps", QString::number(s.fps, 'g', 4));
-			if (s.dropped_frames > 0)
-				text += QStringLiteral(" · ") + T("Dock.Dropped", QString::number(s.dropped_frames));
-		} else if (!s.last_error.empty()) {
+			if (r.dropped_frames > 0)
+				text += QStringLiteral(" · ") + T("Dock.Dropped", QString::number(r.dropped_frames));
+		} else if (!r.error.empty()) {
 			tone = "text-danger";
-			text = T("Dock.Error", Q(s.last_error));
+			text = T("Dock.Error", Q(r.error));
 		} else {
 			text += QStringLiteral(" · ") + T("Dock.Idle");
 		}
@@ -363,8 +364,8 @@ void MixesDock::update_status()
 		set_class(row.dot, tone);
 		set_class(row.status, QStringLiteral("text-small %1").arg(QLatin1String(tone)));
 		row.status->setText(text);
-		row.status->setToolTip(s.recording ? Q(s.path) : QString());
-		row.rec->setText(s.recording ? T("Dock.StopRecord") : T("Dock.Record"));
+		row.status->setToolTip(r.active ? Q(r.path) : QString());
+		row.rec->setText(r.active ? T("Dock.StopRecord") : T("Dock.Record"));
 	}
 
 	if (any_recording && !status_timer_.isActive())
@@ -461,7 +462,7 @@ void MixesDock::open_settings(uint32_t id)
 	if (!current)
 		return;
 	MixConfig cfg = *current;
-	switch (edit_mix_settings(this, cfg, Manager::get().recording(id))) {
+	switch (edit_mix_settings(this, cfg, Manager::get().output_active(id, OutputKind::Record))) {
 	case SettingsResult::Saved:
 		Manager::get().update_mix(cfg);
 		break;

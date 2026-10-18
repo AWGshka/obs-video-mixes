@@ -2,29 +2,49 @@
 
 #include "core/config.hpp"
 #include "core/mix-canvas.hpp"
-#include "core/recording.hpp"
+#include "core/outputs.hpp"
 
 #include <obs-frontend-api.h>
 #include <obs.hpp>
 
+#include <array>
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace vmix {
 
-struct MixState {
-	MixConfig cfg;
-	bool recording = false;
+struct OutputState {
+	bool active = false;
 	bool paused = false;
+	bool reconnecting = false;
 	Trigger origin = Trigger::Manual;
-	std::string path;
+	std::string path; /* record: the file; replay: the last saved file; stream: the server */
 	uint64_t started_ns = 0;
 	int dropped_frames = 0;
 	int total_frames = 0;
-	double fps = 0.0; /* output frame rate while recording */
-	std::string last_error;
+	uint64_t total_bytes = 0;
+	float congestion = 0.0f;
+	std::string error; /* why the last start failed / the output stopped; cleared on start */
+};
+
+struct MixState {
+	MixConfig cfg;
+	std::array<OutputState, kOutputKinds> outputs;
+	double fps = 0.0; /* output frame rate while any output runs */
+	bool previewing = false;
+	std::string error; /* canvas could not be created */
+
+	const OutputState &out(OutputKind k) const { return outputs[(size_t)k]; }
+	bool any_active() const
+	{
+		for (const OutputState &o : outputs)
+			if (o.active)
+				return true;
+		return false;
+	}
 };
 
 /* Owns all mixes and their runtime objects. UI-thread only. */
@@ -38,15 +58,21 @@ public:
 	void shutdown();
 
 	std::vector<MixState> states() const;
+	std::vector<uint32_t> ids() const;
 	const MixConfig *find(uint32_t id) const;
+	uint32_t find_by_name(const std::string &name) const;
 
 	uint32_t add_mix(const std::string &name, MixKind kind);
 	void update_mix(const MixConfig &cfg);
 	void remove_mix(uint32_t id);
 
-	bool start_recording(uint32_t id, Trigger origin = Trigger::Manual);
-	void stop_recording(uint32_t id);
-	bool recording(uint32_t id) const;
+	bool start_output(uint32_t id, OutputKind kind, Trigger origin = Trigger::Manual);
+	void stop_output(uint32_t id, OutputKind kind);
+	bool output_active(uint32_t id, OutputKind kind) const;
+	bool any_active(uint32_t id) const;
+	bool save_replay(uint32_t id);
+	/* Why the last start of this output failed, if it did. */
+	std::string output_error(uint32_t id, OutputKind kind) const;
 
 	/* Preview users keep the mix canvas alive; returns nullptr if the canvas could not be created.
 	 * The canvas may be recreated (video reset, resolution change): re-query canvas() on notify. */
@@ -58,37 +84,60 @@ public:
 	int subscribe(Listener fn);
 	void unsubscribe(int handle);
 
+	/* Called after a replay of a mix was saved (path of the file). */
+	using ReplayListener = std::function<void(uint32_t id, const std::string &path)>;
+	int subscribe_replays(ReplayListener fn);
+	void unsubscribe_replays(int handle);
+
 	/* Entry points for frontend callbacks. */
 	void handle_frontend_event(enum obs_frontend_event event);
 	void persist() { save(); }
 
 private:
+	struct Output {
+		std::unique_ptr<MixOutput> out;
+		Trigger origin = Trigger::Manual;
+		uint64_t token = 0;
+		bool reconnecting = false;
+		std::string error;
+		std::string last_path;
+	};
+
 	struct Runtime {
 		MixConfig cfg;
 		std::unique_ptr<MixCanvas> canvas;
 		int preview_users = 0;
-		std::unique_ptr<MixRecording> rec;
-		Trigger origin = Trigger::Manual;
-		uint64_t token = 0;
+		std::array<Output, kOutputKinds> outputs;
+		std::weak_ptr<EncoderSet> file_encoders;   /* recording + replay buffer */
+		std::weak_ptr<EncoderSet> stream_encoders;
 		double fps = 0.0;
-		std::string last_error;
-		obs_hotkey_id hk_start = OBS_INVALID_HOTKEY_ID;
-		obs_hotkey_id hk_stop = OBS_INVALID_HOTKEY_ID;
+		std::string error;
+		std::map<std::string, obs_hotkey_id> hotkeys;
+
+		Output &out(OutputKind k) { return outputs[(size_t)k]; }
+		const Output &out(OutputKind k) const { return outputs[(size_t)k]; }
+		bool any_output() const;
 	};
 
 	Manager() = default;
 
 	Runtime *runtime(uint32_t id) const;
 	MixCanvas *ensure_canvas(Runtime &rt);
-	void release_canvas_if_unused(Runtime &rt);
-	void register_hotkeys(Runtime &rt);
+	void release_if_unused(Runtime &rt);
+	std::shared_ptr<EncoderSet> encoders_for(Runtime &rt, OutputKind kind, MixCanvas &canvas, std::string &error);
+	bool output_enabled(const MixConfig &cfg, OutputKind kind) const;
+	Trigger output_trigger(const MixConfig &cfg, OutputKind kind) const;
+	OutputSpec output_spec(const MixConfig &cfg, OutputKind kind, Trigger origin) const;
+
+	void sync_hotkeys(Runtime &rt);
 	void unregister_hotkeys(Runtime &rt);
 	void save();
 	void notify();
 
-	void on_recording_stopped(uint64_t token, int code, const std::string &error);
+	void on_output_event(uint64_t token, OutputEvent event, int code, const std::string &text);
 	void on_video_reset();
-	void for_trigger(Trigger trigger, const std::function<void(Runtime &)> &fn);
+	void start_triggered(Trigger trigger);
+	void stop_triggered(Trigger trigger);
 	std::string build_path(const MixConfig &cfg, Trigger origin) const;
 
 	bool initialized_ = false;
@@ -97,6 +146,7 @@ private:
 	uint64_t next_token_ = 1;
 	std::vector<std::unique_ptr<Runtime>> mixes_;
 	std::vector<std::pair<int, Listener>> listeners_;
+	std::vector<std::pair<int, ReplayListener>> replay_listeners_;
 	int next_listener_ = 1;
 	OBSSignal video_reset_signal_;
 };

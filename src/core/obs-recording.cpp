@@ -5,6 +5,7 @@
 #include <obs-frontend-api.h>
 #include <util/config-file.h>
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -131,6 +132,49 @@ bool inherit_obs_recording(MixConfig &cfg)
 		}
 	}
 
+	return found;
+}
+
+bool inherit_obs_stream(MixConfig &cfg)
+{
+	config_t *profile = obs_frontend_get_profile_config();
+	const bool advanced = profile && equals(config_get_string(profile, "Output", "Mode"), "Advanced");
+	OBSOutputAutoRelease stream = obs_frontend_get_streaming_output();
+	bool found = false;
+
+	obs_encoder_t *enc = stream ? obs_output_get_video_encoder(stream) : nullptr;
+	OBSEncoderAutoRelease named;
+	if (!enc) {
+		named = obs_get_encoder_by_name(advanced ? "advanced_video_stream" : "simple_video_stream");
+		enc = named;
+	}
+	if (enc && encoder_selectable(obs_encoder_get_id(enc))) {
+		cfg.stream_encoder_id = obs_encoder_get_id(enc);
+		cfg.stream_encoder_settings = adopt(obs_encoder_get_settings(enc));
+		/* Simple mode writes its bitrate into the encoder only when a stream starts. */
+		if (!obs_data_has_user_value(cfg.stream_encoder_settings, "bitrate")) {
+			const int kbps = profile ? (int)config_get_uint(profile, "SimpleOutput", "VBitrate") : 0;
+			cfg.stream_encoder_settings =
+				adopt(stream_defaults(cfg.stream_encoder_id.c_str(), kbps > 0 ? kbps : 6000));
+		}
+		found = true;
+	}
+
+	if (profile) {
+		int track = 1;
+		int kbps = 0;
+		if (advanced) {
+			track = std::clamp((int)config_get_int(profile, "AdvOut", "TrackIndex"), 1, kAudioTracks);
+			const std::string key = "Track" + std::to_string(track) + "Bitrate";
+			kbps = (int)config_get_uint(profile, "AdvOut", key.c_str());
+		} else {
+			kbps = (int)config_get_uint(profile, "SimpleOutput", "ABitrate");
+		}
+		cfg.stream_audio_track = track;
+		if (kbps > 0)
+			cfg.stream_audio_bitrate = kbps;
+		found = true;
+	}
 	return found;
 }
 
