@@ -482,7 +482,7 @@ void check_outputs(video_t *video, const std::string &dir)
 	} else {
 		expect(!error.empty(), "unreachable server: start fails with a message: " + error);
 	}
-	wait_ms(200); /* like Manager::retire(): the output's connect thread finishes after signalling stop */
+	wait_ms(2000); /* like Manager::retire(): the output's connect thread finishes after signalling stop */
 	stream.reset();
 	stream_encoders.reset();
 	vmix::set_output_event_handler(nullptr);
